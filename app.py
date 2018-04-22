@@ -1,41 +1,52 @@
-import os
 import random
 import time
-from flask import Flask, request, render_template, session, flash, redirect, \
-    url_for, jsonify
-from flask.ext.mail import Mail, Message
+from flask import Flask, request, render_template, session, flash, url_for, redirect, jsonify
 from celery import Celery
-
+from flask_mail import Mail, Message
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'top-secret!'
-
+app.config['SECRET_KEY'] = 'Robin is so handsome'
 # Flask-Mail configuration
-app.config['MAIL_SERVER'] = 'smtp.googlemail.com'
-app.config['MAIL_PORT'] = 587
-app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME')
-app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD')
-app.config['MAIL_DEFAULT_SENDER'] = 'flask@example.com'
-
+app.config['MAIL_SERVER'] = 'smtp.163.com'
+app.config['MAIL_PORT'] = 465
+app.config['MAIL_USE_SSL'] = True
+app.config['MAIL_USERNAME'] = 'your email username'
+app.config['MAIL_PASSWORD'] = 'your email password'  # 163邮箱需要填写授权码而不是密码
+app.config['MAIL_DEFAULT_SENDER'] = 'flask@163.com'
 # Celery configuration
 app.config['CELERY_BROKER_URL'] = 'redis://localhost:6379/0'
 app.config['CELERY_RESULT_BACKEND'] = 'redis://localhost:6379/0'
 
-
-# Initialize extensions
 mail = Mail(app)
 
-# Initialize Celery
-celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
-celery.conf.update(app.config)
+
+def make_celery(app):
+    celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
+    celery.conf.update(app.config)
+    TaskBase = celery.Task
+
+    class ContextTask(TaskBase):
+        abstract = True
+        def __call__(self, *args, **kwargs):
+            #  许多任务 需要在程序的上下文中运行, 在__call__调用之前获得程序上下文
+            with app.app_context():
+                return TaskBase.__call__(self, *args, **kwargs)
+
+    celery.Task = ContextTask
+    return celery
+
+
+celery = make_celery(app)
 
 
 @celery.task
-def send_async_email(msg):
+def send_async_email(email):
     """Background task to send an email with Flask-Mail."""
-    with app.app_context():
-        mail.send(msg)
+
+    # with app.app_context():
+    msg = Message('Hello from Flask', recipients=[email])
+    msg.body = 'This is a test email sent from a background Celery task.'
+    mail.send(msg)
 
 
 @celery.task(bind=True)
@@ -66,17 +77,13 @@ def index():
     email = request.form['email']
     session['email'] = email
 
-    # send the email
-    msg = Message('Hello from Flask',
-                  recipients=[request.form['email']])
-    msg.body = 'This is a test email sent from a background Celery task.'
     if request.form['submit'] == 'Send':
         # send right away
-        send_async_email.delay(msg)
+        send_async_email.delay(email)
         flash('Sending email to {0}'.format(email))
     else:
         # send in one minute
-        send_async_email.apply_async(args=[msg], countdown=60)
+        send_async_email.apply_async(args=[email], countdown=60)
         flash('An email will be sent to {0} in one minute'.format(email))
 
     return redirect(url_for('index'))
@@ -85,14 +92,14 @@ def index():
 @app.route('/longtask', methods=['POST'])
 def longtask():
     task = long_task.apply_async()
-    return jsonify({}), 202, {'Location': url_for('taskstatus',
-                                                  task_id=task.id)}
+    return jsonify({}), 202, {'Location': url_for('taskstatus', task_id=task.id)}
 
 
 @app.route('/status/<task_id>')
 def taskstatus(task_id):
     task = long_task.AsyncResult(task_id)
     if task.state == 'PENDING':
+
         response = {
             'state': task.state,
             'current': 0,
@@ -120,4 +127,4 @@ def taskstatus(task_id):
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
